@@ -60,6 +60,22 @@ def _mock_cube(desc, **kwargs):
     return Cube(df, desc, "TEST", local=True, **kwargs).write_cube()
 
 
+def _without_timestamps(graph):
+    """Copy of ``graph`` without the build-time timestamps.
+
+    ``write_cube`` writes ``schema:datePublished`` and ``schema:dateModified`` from the
+    clock, so two builds differ whenever they straddle a second boundary.
+    """
+    from rdflib import Graph
+    from pylindas.lindas.namespaces import SCHEMA
+
+    stripped = Graph()
+    for s, p, o in graph:
+        if p not in (SCHEMA.datePublished, SCHEMA.dateModified):
+            stripped.add((s, p, o))
+    return stripped
+
+
 def test_validation_off_builds_description_with_unknown_key():
     desc = _load(MOCK)
     desc["UnknownKey"] = "ignored"
@@ -74,7 +90,7 @@ def test_validation_off_graph_equals_validated_build_of_valid_description():
     desc = _load(MOCK)
     on = _mock_cube(copy.deepcopy(desc))
     off = _mock_cube(copy.deepcopy(desc), validate_description=False)
-    assert isomorphic(on._graph, off._graph)
+    assert isomorphic(_without_timestamps(on._graph), _without_timestamps(off._graph))
 
 
 def test_validation_off_unknown_key_does_not_change_graph():
@@ -86,7 +102,7 @@ def test_validation_off_unknown_key_does_not_change_graph():
     with_key["UnknownKey"] = "ignored"
     a = _mock_cube(desc, validate_description=False)
     b = _mock_cube(with_key, validate_description=False)
-    assert isomorphic(a._graph, b._graph)
+    assert isomorphic(_without_timestamps(a._graph), _without_timestamps(b._graph))
 
 
 # --- agreement with jsonschema -------------------------------------------------------------
