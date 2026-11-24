@@ -2,7 +2,7 @@
 
 Validates Requirements 8.1, 8.2, 8.3, 8.4, 8.7:
 
-* pyproject metadata lists exactly the core dependencies and the three extras,
+* pyproject metadata lists exactly the core dependencies and the three extras (``query`` = sparql-dataframe only; SPARQLWrapper is core),
 * every extra-backed function raises ``ImportError`` naming ``pylindas[<extra>]``
   when its package is missing, and leaves its input data untouched,
 * ``pylindas`` imports in a venv that only has the core dependencies.
@@ -25,10 +25,10 @@ import pytest
 
 ROOT = Path(__file__).resolve().parents[2]
 
-CORE = {"numpy", "pandas", "pyshacl", "pyyaml", "rdflib", "requests"}
+CORE = {"numpy", "pandas", "pyshacl", "pyyaml", "rdflib", "requests", "sparqlwrapper"}
 EXTRAS = {
     "shared": {"shapely": ">=2.0.0"},
-    "query": {"sparqlwrapper": ">=2.0.0", "sparql-dataframe": ">=0.4"},
+    "query": {"sparql-dataframe": ">=0.4"},
     "fetch": {"jsonschema": ">=4.0.0"},
 }
 
@@ -50,7 +50,7 @@ def project():
 # --- pyproject metadata (8.1, 8.2, 8.3, 8.4) -------------------------------------------------
 
 
-def test_core_dependencies_are_exactly_the_six(project):
+def test_core_dependencies_are_exactly_the_seven(project):
     names = [_split(r)[0] for r in project["dependencies"]]
     assert len(names) == len(set(names))
     assert set(names) == {_norm(n) for n in CORE}
@@ -101,32 +101,13 @@ def _assert_extra_error(excinfo, extra):
     assert f"pylindas[{extra}]" in str(excinfo.value)
 
 
-def test_query_lindas_without_query_extra(block, real_query):
-    block("SPARQLWrapper")
-    query = "ASK { ?s ?p ?o }"
-    before = copy.deepcopy(query)
-    with pytest.raises(ImportError) as exc:
-        real_query.query_lindas(query, environment="TEST")
-    _assert_extra_error(exc, "query")
-    assert query == before
 
 
-def test_shared_dimension_queries_without_query_extra(block, monkeypatch):
-    monkeypatch.undo()
-    mod = importlib.import_module("pylindas.shared_dimension_queries.shared_dimensions_queries")
-    block("SPARQLWrapper")
-    with pytest.raises(ImportError) as exc:
-        mod.query_lindas("ASK { ?s ?p ?o }", environment="TEST")
-    _assert_extra_error(exc, "query")
 
 
-def test_get_cube_without_query_extra(block, monkeypatch):
-    monkeypatch.undo()
-    get = importlib.import_module("pylindas.getter.get")
-    block("SPARQLWrapper")
-    with pytest.raises(ImportError) as exc:
-        get.get_cube("https://example.org/query", "id", "1")
-    _assert_extra_error(exc, "query")
+
+
+
 
 
 def test_get_observations_without_query_extra(block, monkeypatch):
@@ -141,14 +122,7 @@ def test_get_observations_without_query_extra(block, monkeypatch):
     assert args == before
 
 
-def test_cube_module_wrapper_without_query_extra(block, monkeypatch):
-    """The lazy wrapper in pycube.cube surfaces the same actionable error."""
-    monkeypatch.undo()
-    cube = importlib.import_module("pylindas.pycube.cube")
-    block("SPARQLWrapper")
-    with pytest.raises(ImportError) as exc:
-        cube.query_lindas("ASK { ?s ?p ?o }", environment="TEST")
-    _assert_extra_error(exc, "query")
+
 
 
 def test_geojson_to_wkt_without_shared_extra(block):
@@ -216,21 +190,33 @@ def test_require_extra_message_names_extra(block):
 
 # --- core-only venv (8.1, 8.7) ---------------------------------------------------------------
 
-CORE_DEPS = ["pandas", "numpy", "rdflib", "pyshacl", "PyYAML", "requests"]
+CORE_DEPS = ["pandas", "numpy", "rdflib", "pyshacl", "PyYAML", "requests", "SPARQLWrapper"]
 
 _CORE_ONLY_SCRIPT = """
 import importlib.util
 import pylindas, pylindas.pycube.cube, pylindas.lindas.upload, pylindas.cli
 assert "site-packages" in pylindas.__file__, pylindas.__file__
-for extra_pkg in ("SPARQLWrapper", "sparql_dataframe", "shapely", "jsonschema"):
+for extra_pkg in ("sparql_dataframe", "shapely", "jsonschema"):
     assert importlib.util.find_spec(extra_pkg) is None, extra_pkg
+assert importlib.util.find_spec("SPARQLWrapper") is not None
+import SPARQLWrapper
 from pylindas.lindas.query import query_lindas
+# query_lindas must get past imports without any ImportError (Cube default existence check).
+# Patch the SPARQLWrapper class so no network is used.
+import pylindas.lindas.query as q
+class _Fake:
+    def __init__(self, url): self.url = url
+    def setQuery(self, query): pass
+    def setReturnFormat(self, f): pass
+    def query(self): return self
+    def convert(self): return {"boolean": False}
+q.SPARQLWrapper = _Fake
+assert query_lindas("ASK { ?s ?p ?o }", environment="TEST") is False
+from pylindas.getter.get import get_observations
 try:
-    query_lindas("ASK { ?s ?p ?o }", environment="TEST")
+    get_observations("https://127.0.0.1:1/query", "id", "1")
 except ImportError as e:
     assert "pylindas[query]" in str(e), str(e)
-else:
-    raise SystemExit("ImportError expected")
 print("CORE_ONLY_OK")
 """
 

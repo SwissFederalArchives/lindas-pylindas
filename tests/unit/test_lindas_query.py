@@ -31,7 +31,7 @@ def test_query_lindas_uses_sparqlwrapper_and_returns_boolean():
     """query_lindas wires up SPARQLWrapper and propagates the boolean result."""
     query = "ASK { ?s ?p ?o }"
 
-    with patch("SPARQLWrapper.SPARQLWrapper") as MockSW:
+    with patch("pylindas.lindas.query.SPARQLWrapper") as MockSW:
         inst = MockSW.return_value
         inst.query.return_value.convert.return_value = {"boolean": True}
 
@@ -55,7 +55,7 @@ def test_query_lindas_uses_sparqlwrapper_and_returns_boolean():
 @pytest.mark.parametrize("environment,expected_url", list(_ENV_ENDPOINTS.items()))
 def test_query_lindas_env_endpoints(environment, expected_url):
     """Each environment maps to its correct SPARQL endpoint URL."""
-    with patch("SPARQLWrapper.SPARQLWrapper") as MockSW:
+    with patch("pylindas.lindas.query.SPARQLWrapper") as MockSW:
         inst = MockSW.return_value
         inst.query.return_value.convert.return_value = {"boolean": False}
 

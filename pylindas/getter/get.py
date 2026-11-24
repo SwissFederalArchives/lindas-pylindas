@@ -1,3 +1,5 @@
+from SPARQLWrapper import SPARQLWrapper, JSON
+
 from pylindas._optional import require_extra
 
 
@@ -35,8 +37,6 @@ def get_cube(endpoint: str, identifier: str, version: str):
                schema:version {version} .
         }}
     """
-    _sw = require_extra("SPARQLWrapper", "query")
-    SPARQLWrapper, JSON = _sw.SPARQLWrapper, _sw.JSON
     sparql = SPARQLWrapper(endpoint)
     sparql.setReturnFormat(JSON)
     sparql.setQuery(query)

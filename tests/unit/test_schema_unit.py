@@ -144,7 +144,7 @@ def test_subset_validator_agrees_with_jsonschema(desc):
 
 # --- installed wheel, core dependencies only -----------------------------------------------
 
-CORE_DEPS = ["pandas", "numpy", "rdflib", "pyshacl", "PyYAML", "requests"]
+CORE_DEPS = ["pandas", "numpy", "rdflib", "pyshacl", "PyYAML", "requests", "SPARQLWrapper"]
 
 _WHEEL_SCRIPT = textwrap.dedent(
     """
