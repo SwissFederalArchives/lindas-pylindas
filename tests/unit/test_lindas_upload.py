@@ -20,6 +20,7 @@ sockets, so an accidental outbound connection becomes an immediate failure.
 from unittest.mock import MagicMock, mock_open, patch
 
 from pylindas.lindas import upload
+from pylindas.lindas.exceptions import UploadValidationError
 
 
 _DUMMY_CONFIG = {
@@ -33,6 +34,8 @@ def _ok_response():
     """A mock HTTP response whose ``raise_for_status`` does nothing."""
     resp = MagicMock(name="response")
     resp.raise_for_status.return_value = None
+    resp.status_code = 200
+    resp.text = ""
     return resp
 
 
@@ -42,7 +45,7 @@ def test_upload_ttl_single_file_posts_once_no_delete():
     mock_delete = MagicMock(name="delete", return_value=_ok_response())
 
     with patch.object(upload, "_load_config", return_value=_DUMMY_CONFIG), patch(
-        "pylindas.lindas.upload.requests.post", mock_post
+        "pylindas.lindas.upload.requests.request", mock_post
     ), patch("pylindas.lindas.upload.requests.delete", mock_delete), patch(
         "builtins.open", mock_open(read_data=b"<a> <b> <c> .")
     ):
@@ -59,7 +62,8 @@ def test_upload_ttl_single_file_posts_once_no_delete():
 
     # POST targets the configured endpoint, the right named graph, as text/turtle.
     args, kwargs = mock_post.call_args
-    assert args[0] == _DUMMY_CONFIG["endpoint"]
+    assert args[0] == "POST"
+    assert args[1] == _DUMMY_CONFIG["endpoint"]
     assert kwargs["params"] == {"graph": "urn:graph"}
     assert kwargs["headers"]["Content-Type"] == "text/turtle"
     assert kwargs["auth"] is not None
@@ -71,7 +75,7 @@ def test_upload_ttl_clear_graph_deletes_then_posts():
     mock_delete = MagicMock(name="delete", return_value=_ok_response())
 
     with patch.object(upload, "_load_config", return_value=_DUMMY_CONFIG), patch(
-        "pylindas.lindas.upload.requests.post", mock_post
+        "pylindas.lindas.upload.requests.request", mock_post
     ), patch("pylindas.lindas.upload.requests.delete", mock_delete), patch(
         "builtins.open", mock_open(read_data=b"<a> <b> <c> .")
     ):
@@ -95,7 +99,7 @@ def test_upload_ttl_list_of_files_posts_each():
     mock_delete = MagicMock(name="delete", return_value=_ok_response())
 
     with patch.object(upload, "_load_config", return_value=_DUMMY_CONFIG), patch(
-        "pylindas.lindas.upload.requests.post", mock_post
+        "pylindas.lindas.upload.requests.request", mock_post
     ), patch("pylindas.lindas.upload.requests.delete", mock_delete), patch(
         "builtins.open", mock_open(read_data=b"<a> <b> <c> .")
     ):
@@ -109,6 +113,45 @@ def test_upload_ttl_list_of_files_posts_each():
 
     assert mock_post.call_count == 2
     mock_delete.assert_not_called()
+
+
+def test_upload_ttl_without_credentials_sends_no_auth():
+    """An ini section without username/password uploads with ``auth=None``."""
+    mock_request = MagicMock(name="request", return_value=_ok_response())
+    config = {"endpoint": _DUMMY_CONFIG["endpoint"]}
+
+    with patch.object(upload, "_load_config", return_value=config), patch(
+        "pylindas.lindas.upload.requests.request", mock_request
+    ), patch("builtins.open", mock_open(read_data=b"<a> <b> <c> .")):
+        upload.upload_ttl(
+            filename="some.ttl",
+            db_file="ignored.ini",
+            environment="TEST",
+            graph_uri="urn:graph",
+        )
+
+    mock_request.assert_called_once()
+    assert mock_request.call_args.kwargs["auth"] is None
+
+
+def test_upload_graph_rejects_missing_auth_without_request():
+    """Direct ``upload_graph`` calls require auth and send nothing otherwise."""
+    mock_request = MagicMock(name="request", return_value=_ok_response())
+
+    with patch("pylindas.lindas.upload.requests.request", mock_request):
+        try:
+            upload.upload_graph(
+                b"<a> <b> <c> .",
+                endpoint=_DUMMY_CONFIG["endpoint"],
+                graph_uri="urn:graph",
+                auth=None,
+            )
+        except UploadValidationError:
+            pass
+        else:
+            raise AssertionError("expected UploadValidationError")
+
+    mock_request.assert_not_called()
 
 
 def test_upload_ttl_missing_endpoint_raises():
