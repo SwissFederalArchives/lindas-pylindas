@@ -527,7 +527,9 @@ class Cube:
         if filename is None:
             return turtle
         try:
-            with open(filename, "w", encoding="utf-8") as f:
+            # newline="": no newline translation, otherwise Windows turns "\n" inside
+            # multi-line literals into "\r\n" and the written cube differs from the graph.
+            with open(filename, "w", encoding="utf-8", newline="") as f:
                 f.write(turtle)
         except OSError as e:
             raise OSError(e.errno, f"Cannot write Turtle to '{os.fspath(filename)}': {e.strerror or e}", os.fspath(filename)) from e

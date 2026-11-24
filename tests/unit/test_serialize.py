@@ -5,7 +5,6 @@ deviation from the requirement text (which says ``None``); it is documented
 in the ``serialize`` docstring.
 """
 import copy
-import os
 from pathlib import Path
 
 import pandas as pd
@@ -81,6 +80,22 @@ def test_file_is_utf8_and_non_ascii_round_trips(cube, tmp_path):
     assert _NON_ASCII.encode("utf-8") in raw
     parsed = Graph().parse(data=raw.decode("utf-8"), format="turtle")
     assert any(str(o) == _NON_ASCII for o in parsed.objects())
+
+
+def test_file_keeps_newlines_in_literals_byte_exact(tmp_path):
+    """The file holds exactly the bytes of the string variant on every OS.
+
+    Regression: writing in text mode turned "\\n" inside multi-line literals
+    into "\\r\\n" on Windows, so the file no longer matched the cube graph.
+    """
+    df = pd.DataFrame({"Jahr": [2020], "Station": ["Bern"], "Wert": [1.5],
+                       "Standardfehler": [0.1], "Status": ["line one\nline two"]})
+    c = Cube(dataframe=df, cube_yaml=copy.deepcopy(_DESCRIPTION), environment="TEST", local=True)
+    c.prepare_data().write_cube().write_observations().write_shape()
+    path = tmp_path / "cube.ttl"
+    c.serialize(str(path))
+    assert b"\r\n" not in path.read_bytes()
+    assert path.read_bytes() == c.serialize().encode("utf-8")
 
 
 def test_unwritable_path_names_path_and_leaves_graph_unchanged(cube, tmp_path):

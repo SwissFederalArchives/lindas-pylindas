@@ -99,7 +99,7 @@ def test_upload_ttl_still_works(tmp_path):
     ini = tmp_path / "lindas.ini"
     ini.write_text(f"[TEST]\nendpoint={ENDPOINT}\nusername=u\npassword=p\n")
     ttl = tmp_path / "a.ttl"
-    ttl.write_text(TTL)
+    ttl.write_bytes(TTL.encode("utf-8"))
     responses.add(responses.POST, ENDPOINT, status=204)
 
     result = upload_ttl(str(ttl), str(ini), "TEST", GRAPH)

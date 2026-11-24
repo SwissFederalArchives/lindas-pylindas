@@ -1,7 +1,6 @@
 """Property 14: missing key values are counted per column by ``validate_dataframe``."""
 import re
 
-import numpy as np
 import pandas as pd
 from hypothesis import given, settings, strategies as st
 from pandas.testing import assert_frame_equal
