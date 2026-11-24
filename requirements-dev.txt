@@ -24,4 +24,5 @@ shapely==2.0.6
 # --- Dev / test tooling ---
 pytest>=8.0
 hypothesis>=6.100
+responses==0.25.3
 ruff>=0.6

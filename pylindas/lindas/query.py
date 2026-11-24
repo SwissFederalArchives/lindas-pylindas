@@ -1,6 +1,9 @@
-from SPARQLWrapper import SPARQLWrapper, JSON
+from pylindas._optional import require_extra
 
 def query_lindas(query: str, environment: str):
+    # SPARQLWrapper is an optional dependency (extra "query"); import lazily.
+    sparql_wrapper = require_extra("SPARQLWrapper", "query")
+    SPARQLWrapper, JSON = sparql_wrapper.SPARQLWrapper, sparql_wrapper.JSON
     match environment:
         case "TEST":
             sparql = SPARQLWrapper("https://test.lindas.admin.ch/query")

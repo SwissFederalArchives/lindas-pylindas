@@ -1,4 +1,4 @@
-from SPARQLWrapper import SPARQLWrapper, JSON
+from pylindas._optional import require_extra
 from rdflib import URIRef
 from typing import List
 import json
@@ -33,6 +33,8 @@ def query_lindas(query: str, environment: str):
         case _:
             endpoint = "https://test.lindas.admin.ch/query"
 
+    _sw = require_extra("SPARQLWrapper", "query")
+    SPARQLWrapper, JSON = _sw.SPARQLWrapper, _sw.JSON
     sparql = SPARQLWrapper(endpoint)
     sparql.setQuery(query=query)
     sparql.setReturnFormat(JSON)

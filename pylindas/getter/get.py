@@ -1,5 +1,4 @@
-import sparql_dataframe
-from SPARQLWrapper import SPARQLWrapper, JSON
+from pylindas._optional import require_extra
 
 
 def get_cube(endpoint: str, identifier: str, version: str):
@@ -36,6 +35,8 @@ def get_cube(endpoint: str, identifier: str, version: str):
                schema:version {version} .
         }}
     """
+    _sw = require_extra("SPARQLWrapper", "query")
+    SPARQLWrapper, JSON = _sw.SPARQLWrapper, _sw.JSON
     sparql = SPARQLWrapper(endpoint)
     sparql.setReturnFormat(JSON)
     sparql.setQuery(query)
@@ -96,6 +97,7 @@ def get_observations(endpoint: str, identifier: str, version: str):
         }}
     """
 
+    sparql_dataframe = require_extra("sparql_dataframe", "query")
     df = sparql_dataframe.get(endpoint, query)
     observations = df.pivot(index="obs", columns="pred", values="value").reset_index(drop=True)
     return observations
