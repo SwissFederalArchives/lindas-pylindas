@@ -1,4 +1,6 @@
+import copy
 import logging
+import os
 import re
 from urllib.parse import quote
 from rdflib import BNode, Graph, Literal, RDF, URIRef, XSD, DCTERMS
@@ -28,8 +30,26 @@ from pylindas.lindas.namespaces import (
     VCARD,
     VOID,
 )
-from pylindas.lindas.query import query_lindas
-from pylindas.lindas.exceptions import CubeAlreadyExistsError
+from pylindas.lindas.exceptions import (
+    CubeAlreadyExistsError,
+    DescriptionValidationError,
+    ExistenceCheckError,
+    HierarchyError,
+)
+from pylindas.pycube.schema import validate_description as validate_description_schema
+
+
+def query_lindas(query: str, environment: str):
+    """Thin wrapper that lazily imports the real ``query_lindas``.
+
+    Keeps ``pylindas.pycube.cube`` importable without the ``query`` extra and
+    gives tests a module-level name to patch.
+    """
+    from pylindas.lindas.query import query_lindas as _query_lindas
+    return _query_lindas(query, environment=environment)
+
+from pylindas.pycube.validation import dimension_columns, validate_dataframe
+from pylindas.pycube.hierarchy import check_hierarchy, edges_from_parent_column
 from pyshacl import validate
 
 logger = logging.getLogger('pycube')
@@ -47,7 +67,10 @@ class Cube:
     _languages = (lst := ["fr", "en", "de", "it", "la", "rm"] ) + [item.upper() for item in lst]
 
     
-    def __init__(self, dataframe: pd.DataFrame, cube_yaml: dict, environment: str, local=False):
+    _EXISTENCE_CHECK_MODES = ("public", "none")
+
+    def __init__(self, dataframe: pd.DataFrame, cube_yaml: dict, environment: str, local=False,
+                 existence_check: str = "public", validate_description: bool = True):
         """
         Initialize a Cube object.
 
@@ -56,17 +79,65 @@ class Cube:
             cube_yaml (dict): A dictionary containing cube information.
             environment (str): The environment of the cube.
             local (bool): A flag indicating whether the cube is local.
+            existence_check (str): "public" (default) asks the public endpoint whether the cube
+                already exists and raises CubeAlreadyExistsError; "none" sends no request.
+            validate_description (bool): Whether the cube description is schema-validated.
+                If True (default), the description is checked against the packaged schema before any
+                triple is created; False skips the check.
 
         Returns:
             None
+
+        Raises:
+            ExistenceCheckError: if ``existence_check`` is not "public" or "none".
+            DescriptionValidationError: if ``validate_description`` is True and the description violates the schema.
         """
-        self._dataframe = dataframe
+        if existence_check not in self._EXISTENCE_CHECK_MODES:
+            raise ExistenceCheckError(
+                f"Invalid value {existence_check!r} for parameter 'existence_check'; "
+                f"accepted values are \"public\" and \"none\"."
+            )
+        # Deep copy first, so nothing below (success or error) can touch the caller's objects.
+        cube_yaml = copy.deepcopy(cube_yaml)
+        self._dataframe = dataframe.copy()
+        self._existence_check = existence_check
+        self._validate_description = validate_description
+        if validate_description:
+            violations = validate_description_schema(cube_yaml)
+            if violations:
+                raise DescriptionValidationError(violations)
+        # Computed once, before _setup_shape_dicts pops "dimensions" from the working dict.
+        self._dimension_columns = dimension_columns(cube_yaml)
+        # Independent copy: _cube_dict (below) is mutated during setup, _cube_yaml is not.
+        self._cube_yaml = copy.deepcopy(cube_yaml)
+        validate_dataframe(self._dataframe, self._dimension_columns, self._input_key_columns(cube_yaml))
         self._setup_cube_dict(cube_yaml=cube_yaml)
-        self._cube_uri, self._cube_uri_no_version = self._setup_cube_uri(local=local, environment=environment)
+        self._cube_uri, self._cube_uri_no_version = self._setup_cube_uri(
+            local=local, environment=environment, existence_check=existence_check)
         assert self._cube_uri is not None
         self._setup_shape_dicts()
         self._graph = self._setup_graph()
+        self._concept_tables = {}   # concept key -> (versioned URI template, table incl. URI column)
+        self._pending_roots = []    # concept-mapped hierarchy roots waiting for their concept table
         # self._graph.serialize("example/mock-cube.ttl", format="turtle")
+
+    def dimension_columns(self) -> list:
+        """Column names the description expects (dimensions, then measures), unique, in order."""
+        return list(self._dimension_columns)
+
+    @staticmethod
+    def _input_key_columns(cube_yaml: dict) -> list:
+        """Key columns used for the missing-value and duplicate checks (Requirement 6).
+
+        Resolution order: dimensions flagged ``key: true``; otherwise dimensions with
+        ``dimension-type: Key Dimension`` (what pylindas descriptions actually use; the
+        design named only ``key: true``); otherwise all dimensions.
+        """
+        dims = cube_yaml.get("dimensions") or {}
+        flagged = [n for n, d in dims.items() if isinstance(d, dict) and d.get("key") is True]
+        if not flagged:
+            flagged = [n for n, d in dims.items() if isinstance(d, dict) and d.get("dimension-type") == "Key Dimension"]
+        return flagged or list(dims)
 
     def __str__(self) -> str:
         """
@@ -208,7 +279,7 @@ class Cube:
         self._base_uri = URIRef(base_uri)
         self._cube_dict = cube_yaml
 
-    def _setup_cube_uri(self, local: bool, environment="TEST") ->  Tuple[URIRef, URIRef]:
+    def _setup_cube_uri(self, local: bool, environment="TEST", existence_check: str = "public") ->  Tuple[URIRef, URIRef]:
         """
         Set up the cube URI by concatenating the base URI and the cube identifier with the version.
 
@@ -219,7 +290,7 @@ class Cube:
         cube_uri = cube_uri_no_version + "/" + str(self._cube_dict.get("Version"))
 
         query = f"ASK {{ <{cube_uri}> ?p ?o}}"
-        if not local:
+        if not local and existence_check == "public":
             if query_lindas(query, environment=environment) == True:
                 raise CubeAlreadyExistsError(cube_uri)
 
@@ -426,18 +497,40 @@ class Cube:
         self._dataframe.apply(self._add_observation, axis=1)
         return self
 
-    def serialize(self, filename: str) -> Self:
-        """Serialize the cube to a file.
+    def serialize(self, filename: Union[str, "os.PathLike[str]", None] = None) -> Union[str, Self]:
+        """Serialize the cube to Turtle, as a string or to a file.
 
-        This function serializes the cube to the given file name in turtle format.
+        Without a file name the Turtle is returned as ``str`` and no file is
+        touched. With a file name the Turtle is written UTF-8 encoded, replacing
+        existing content, and the cube is returned so calls can be chained.
+
+        Note: requirement 2.2 says the file variant returns ``None``. This
+        method deliberately keeps returning ``self`` (existing callers chain
+        ``cube.serialize("x.ttl")...``). The requirement should be aligned.
 
         Args:
-            filename (str): The name of the file to write the cube to.
+            filename: Optional path of the file to write the cube to.
 
         Returns:
-            Self
+            The Turtle string if ``filename`` is None, otherwise ``self``.
+
+        Raises:
+            OSError: If the file cannot be written; the message names the path.
+                The cube graph is left unchanged.
         """
-        self._graph.serialize(destination=filename, format="turtle", encoding="utf-8")
+        for _node, dim_name, root, _key in self._pending_roots:
+            logger.warning(f"Dimension '{dim_name}': hierarchy root '{root}' is not written because no matching "
+                           f"concept table was added with write_concept().")
+        turtle = self._graph.serialize(format="turtle")
+        if isinstance(turtle, bytes):
+            turtle = turtle.decode("utf-8")
+        if filename is None:
+            return turtle
+        try:
+            with open(filename, "w", encoding="utf-8") as f:
+                f.write(turtle)
+        except OSError as e:
+            raise OSError(e.errno, f"Cannot write Turtle to '{os.fspath(filename)}': {e.strerror or e}", os.fspath(filename)) from e
         return self
 
     def _add_observation(self, obs: pd.Series) -> None:
@@ -514,6 +607,9 @@ class Cube:
 
         concept = concepts.get(concept_key)
 
+        # Work on a copy: the caller's frame must not receive URI columns
+        concept_data = concept_data.copy()
+
         # Mandatory value, will cause an exception if not found
         uri = concept.get("URI")
         nameField = concept.get("name-field")
@@ -567,10 +663,78 @@ class Cube:
         else:
             otherFields_dict = {}
 
+        # Hierarchy edges: validate everything before the first triple is added
+        hierarchy_edges = self._concept_hierarchy_edges(concept_key, concept, concept_data, uri_versioned)
+
+        # Hierarchy roots waiting for this table: resolve (and validate) before the first triple
+        previous_table = self._concept_tables.get(concept_key)
+        self._concept_tables[concept_key] = (uri_versioned, concept_data)
+        try:
+            resolved_roots = []
+            for pending in self._pending_roots:
+                root_iri = self._resolve_pending_root(pending)
+                if root_iri is not None:
+                    resolved_roots.append((pending, root_iri))
+        except HierarchyError:
+            if previous_table is None:
+                del self._concept_tables[concept_key]
+            else:
+                self._concept_tables[concept_key] = previous_table
+            raise
+
         # Add the concepts to the graph
         concept_data.apply(self._add_concept, axis=1,  args=(nameField, multilingual, positionField, otherFields_dict))
 
+        for parent_iri, child_iri in hierarchy_edges:
+            self._graph.add((parent_iri, SCHEMA.hasPart, child_iri))
+
+        for pending, root_iri in resolved_roots:
+            self._graph.add((pending[0], META.hierarchyRoot, root_iri))
+            self._pending_roots.remove(pending)
+
         return self
+
+    @staticmethod
+    def _concept_id_field(concept_key: str, uri_template: str, concept_data: pd.DataFrame) -> str:
+        """The concept ID column: the single placeholder of the URI template, else a column named ``ID``."""
+        placeholders = [p for p in re.findall(r'\{(.*?)\}', uri_template) if p in concept_data.columns]
+        placeholders = list(dict.fromkeys(placeholders))
+        if len(placeholders) == 1:
+            return placeholders[0]
+        if "ID" in concept_data.columns:
+            return "ID"
+        raise HierarchyError(
+            f"Concepts.{concept_key}: cannot determine the concept ID column for parent-field "
+            f"(URI template has placeholders {placeholders}; add a column 'ID')",
+            details={"placeholders": placeholders})
+
+    def _concept_hierarchy_edges(self, concept_key: str, concept: dict, concept_data: pd.DataFrame,
+                                 uri_template: str) -> list[Tuple[URIRef, URIRef]]:
+        """Resolve ``parent-field`` into (parent IRI, child IRI) edges, after validating them.
+
+        The concept ID column is the single placeholder of the URI template (or a column
+        named ``ID`` if the template has several). Parent IRIs are the IRIs of the rows
+        carrying that ID, so they use the same template as the children.
+        No ``parent-field`` means no edges. Raises HierarchyError before anything is added.
+        """
+        parent_field = concept.get("parent-field")
+        if not parent_field:
+            return []
+        if parent_field not in concept_data.columns:
+            raise HierarchyError(
+                f"Concepts.{concept_key}.parent-field '{parent_field}' is not a column of the concept table",
+                details={"missing_column": parent_field})
+
+        id_field = self._concept_id_field(concept_key, uri_template, concept_data)
+
+        ids = [str(v) for v in concept_data[id_field]]
+        parents = list(concept_data[parent_field])
+        check_hierarchy(ids, parents)
+
+        iri_by_id: dict[str, str] = {}
+        for concept_id, iri in zip(ids, concept_data["URI"]):
+            iri_by_id.setdefault(concept_id, iri)
+        return [(URIRef(iri_by_id[p]), URIRef(iri_by_id[c])) for p, c in edges_from_parent_column(ids, parents)]
     
     def _add_concept(self, concept: pd.DataFrame, nameField: str, multilingual: bool, positionField:str, otherFields_dict):
         """Add a concept to the graph.
@@ -818,6 +982,18 @@ class Cube:
         root = str(hierarchy_dict.get("root"))
         if root.startswith("http"):
             self._graph.add((hierarchy_node, META.hierarchyRoot, URIRef(root)))
+        elif (dim_dict or {}).get("mapping", {}).get("type") == "concept":
+            # The root is a concept ID. Its IRI is the IRI of the concept row with that ID
+            # (same template as the concept rows). The concept table is usually written
+            # after the shape, so the root is resolved, and validated, as soon as the
+            # matching table is known. No hierarchyRoot triple exists before that check.
+            dim_name = next((n for n, d in self._shape_dict.items() if d is dim_dict), "?")
+            pending = (hierarchy_node, dim_name, root, self._template_key(self._dim_concept_template(dim_dict)))
+            resolved = self._resolve_pending_root(pending)
+            if resolved is not None:
+                self._graph.add((hierarchy_node, META.hierarchyRoot, resolved))
+            else:
+                self._pending_roots.append(pending)
         else:
             mapping_dict = dim_dict.get("mapping")
             if mapping_dict.get("type") == "additive":
@@ -834,6 +1010,37 @@ class Cube:
         self._write_next_in_hierarchy(next_dict, parent_node=hierarchy_node)
         
         return hierarchy_node
+
+    @staticmethod
+    def _template_key(template: str) -> str:
+        """Placeholder names differ between a dimension mapping and its concept table; compare shapes only."""
+        return re.sub(r'\{.*?\}', '{}', template)
+
+    def _dim_concept_template(self, dim_dict: dict) -> str:
+        """Absolute IRI template of a ``concept`` mapping (same logic as ``_apply_mappings``)."""
+        repl = dim_dict.get("mapping").get("replacement-automated")
+        if repl.startswith("/"):
+            repl = str(self._cube_uri) + "/concept" + repl
+        return repl
+
+    def _resolve_pending_root(self, pending) -> URIRef | None:
+        """Return the root IRI if a matching concept table is registered, else None.
+
+        Raises HierarchyError (naming dimension and value) if the table has no concept with the root ID.
+        """
+        _node, dim_name, root, key = pending
+        for concept_key, (template, table) in self._concept_tables.items():
+            if self._template_key(template) != key:
+                continue
+            id_field = self._concept_id_field(concept_key, template, table)
+            for concept_id, iri in zip(table[id_field], table["URI"]):
+                if str(concept_id) == root:
+                    return URIRef(iri)
+            raise HierarchyError(
+                f"Dimension '{dim_name}': hierarchy root '{root}' is not an ID in the concept table "
+                f"'{concept_key}'",
+                details={"dimension": dim_name, "root": root, "concept": concept_key})
+        return None
 
     def _write_next_in_hierarchy(self, next_dict: dict, parent_node: BNode):
         next_node = BNode()
