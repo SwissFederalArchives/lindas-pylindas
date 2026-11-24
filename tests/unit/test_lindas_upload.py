@@ -170,3 +170,93 @@ def test_upload_ttl_missing_endpoint_raises():
             assert "endpoint" in str(exc)
         else:
             raise AssertionError("expected an exception for missing endpoint")
+
+
+_SECRET_CONFIG = {
+    "endpoint": "https://example.test/rdf-graphs/service",
+    "username": "alice-secret-user",
+    "password": "s3cr3t-pw-value",
+}
+
+
+def _run_ttl(request_mock, config=_SECRET_CONFIG):
+    with patch.object(upload, "_load_config", return_value=config), patch(
+        "pylindas.lindas.upload.requests.request", request_mock
+    ), patch("builtins.open", mock_open(read_data=b"<a> <b> <c> .")):
+        upload.upload_ttl(
+            filename="some.ttl",
+            db_file="ignored.ini",
+            environment="TEST",
+            graph_uri="urn:graph",
+        )
+
+
+def test_upload_ttl_sends_without_timeout():
+    """``upload_ttl`` passes ``timeout=None``; ``upload_graph`` keeps 300."""
+    mock_request = MagicMock(name="request", return_value=_ok_response())
+    _run_ttl(mock_request)
+    assert mock_request.call_args.kwargs["timeout"] is None
+
+    mock_request.reset_mock()
+    with patch("pylindas.lindas.upload.requests.request", mock_request):
+        upload.upload_graph(
+            b"<a> <b> <c> .",
+            endpoint=_DUMMY_CONFIG["endpoint"],
+            graph_uri="urn:graph",
+            auth=("u", "p"),
+        )
+    assert mock_request.call_args.kwargs["timeout"] == 300
+
+
+def test_upload_ttl_timeout_surfaces_as_requests_timeout_without_secrets():
+    """A timeout is a ``requests.exceptions.Timeout`` with no leaked credentials."""
+    import requests
+
+    leaky = requests.Timeout(
+        "read timed out https://alice-secret-user:s3cr3t-pw-value@example.test/"
+    )
+    mock_request = MagicMock(name="request", side_effect=leaky)
+
+    try:
+        _run_ttl(mock_request)
+    except requests.exceptions.Timeout as err:
+        error = err
+    else:
+        raise AssertionError("expected requests.exceptions.Timeout")
+
+    assert not isinstance(error, requests.HTTPError)
+    seen = set()
+    cur = error
+    while cur is not None and id(cur) not in seen:
+        seen.add(id(cur))
+        text = f"{cur!s} {cur!r} {cur.args}"
+        assert "alice-secret-user" not in text
+        assert "s3cr3t-pw-value" not in text
+        cur = cur.__cause__ or cur.__context__
+    assert error.__cause__ is None
+    assert error.__context__ is None
+
+
+def test_upload_ttl_http_500_raises_http_error_with_status_and_masked_body():
+    """HTTP errors keep status and body, with credentials masked."""
+    import requests
+
+    resp = MagicMock(name="response")
+    resp.status_code = 500
+    resp.text = "boom alice-secret-user s3cr3t-pw-value"
+    mock_request = MagicMock(name="request", return_value=resp)
+
+    try:
+        _run_ttl(mock_request)
+    except requests.HTTPError as err:
+        error = err
+    else:
+        raise AssertionError("expected requests.HTTPError")
+
+    assert not isinstance(error, requests.exceptions.Timeout)
+    assert error.response.status_code == 500
+    body = error.response.text
+    assert "boom" in body
+    assert "alice-secret-user" not in body and "s3cr3t-pw-value" not in body
+    assert "alice-secret-user" not in str(error)
+    assert "s3cr3t-pw-value" not in str(error)

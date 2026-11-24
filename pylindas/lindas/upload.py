@@ -148,9 +148,12 @@ def _send_graph(
     graph_uri: str,
     auth: Union[HTTPBasicAuth, None],
     method: str,
-    timeout: float = 300,
+    timeout: Union[float, None] = 300,
 ) -> None:
-    """Send already-validated Turtle bytes; ``auth=None`` sends no credentials."""
+    """Send already-validated Turtle bytes; ``auth=None`` sends no credentials.
+
+    ``timeout=None`` disables the request timeout (used by ``upload_ttl``).
+    """
     secrets = (auth.username, auth.password) if auth is not None else ()
     try:
         resp = requests.request(
@@ -175,7 +178,8 @@ def _send_graph(
         # credentials). The message is built from masked values only.
         raise UploadTimeoutError(
             f"{method} to <{_mask(graph_uri, secrets)}> at {safe_endpoint} "
-            f"timed out after {timeout} seconds"
+            f"timed out"
+            + (f" after {timeout} seconds" if timeout is not None else "")
         )
 
     if resp.status_code >= 400:
@@ -229,6 +233,7 @@ def upload_ttl(
         print(f"uploading: {file}")
         with open(file, "rb") as f:
             content = f.read()
+        failure = None
         try:
             _send_graph(
                 content,
@@ -236,12 +241,19 @@ def upload_ttl(
                 graph_uri=graph_uri,
                 auth=auth,
                 method="POST",
+                timeout=None,
             )
         except UploadError as exc:
-            response = requests.Response()
-            response.status_code = exc.status
-            response._content = exc.body.encode("utf-8")
-            raise requests.HTTPError(str(exc), response=response) from None
+            failure = exc
+        if failure is None:
+            return
+        # Raised outside the ``except`` block: no __cause__/__context__ chain.
+        if isinstance(failure, UploadTimeoutError):
+            raise requests.exceptions.Timeout(str(failure))
+        response = requests.Response()
+        response.status_code = failure.status
+        response._content = failure.body.encode("utf-8")
+        raise requests.HTTPError(str(failure), response=response)
 
     files = [filename] if isinstance(filename, str) else filename
     for f in files:
