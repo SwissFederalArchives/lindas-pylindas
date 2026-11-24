@@ -217,7 +217,7 @@ def test_schema_violations_reported_with_paths(sc):
 
     # (b) one error from the constructor lists every violation with path and message
     with pytest.raises(DescriptionValidationError) as exc:
-        Cube(pd.DataFrame({"k": ["a"]}), desc, "TEST", local=True)
+        Cube(pd.DataFrame({"k": ["a"]}), desc, "TEST", local=True, validate_description="strict")
     assert sorted(v.path for v in exc.value.violations) == expected
     for v in exc.value.violations:
         assert f"{v.path}: {v.message}" in str(exc.value)

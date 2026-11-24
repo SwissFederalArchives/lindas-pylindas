@@ -1,6 +1,9 @@
 """Property test: all input validation failures are reported together.
 
-Design reference: lindas-publication, Property 15 (Requirements 6.6, 6.7).
+Design reference: lindas-publication, Property 15 (Requirement 6.7).
+
+Missing key values are no longer a failure kind (they become cube:Undefined); frames
+containing them must not add a problem..
 """
 import pandas as pd
 import pytest
@@ -17,7 +20,6 @@ _KIND_PREFIXES = {
     "extra": "Unexpected columns not in the cube description",
     "missing_cols": "Columns required by the cube description are missing",
     "empty": "The DataFrame has no rows",
-    "missing_values": "Key column ",
     "duplicates": None,  # matched by substring below
 }
 
@@ -31,8 +33,6 @@ def _kinds(problems: list[str]) -> set[str]:
             found.add("missing_cols")
         elif p.startswith(_KIND_PREFIXES["empty"]):
             found.add("empty")
-        elif p.startswith(_KIND_PREFIXES["missing_values"]) and "missing value(s)" in p:
-            found.add("missing_values")
         elif "duplicate key combination" in p:
             found.add("duplicates")
         else:
@@ -85,15 +85,13 @@ def cases(draw):
     if empty:
         kinds.add("empty")
     if not empty:
-        if (null_a is not None and "a" in present_keys) or (null_b is not None and "b" in present_keys):
-            kinds.add("missing_values")
         if dup and len(present_keys) == len(KEYS):
             kinds.add("duplicates")
     return df, kinds
 
 
 # Feature: lindas-publication, Property 15: All input validation failures are reported together
-# Validates: Requirements 6.6, 6.7
+# Validates: Requirements 6.7
 @settings(max_examples=300, deadline=None)
 @given(cases())
 def test_all_failures_reported_together(case):

@@ -1,5 +1,4 @@
 """Unit tests for ``pycube.validation`` (Requirements 6.1 - 6.7)."""
-import numpy as np
 import pandas as pd
 import pytest
 
@@ -37,14 +36,6 @@ def test_empty_frame():
     assert any("no rows" in m for m in p)
 
 
-def test_missing_key_values_counted_per_column():
-    df = pd.DataFrame({"a": ["x", None, np.nan], "b": [1, 2, 3]}, dtype=object)
-    df["b"] = pd.array([1, pd.NA, 3], dtype="Int64")
-    p = _problems(df, ["a", "b"], ["a", "b"])
-    assert any("'a'" in m and "2 missing" in m for m in p)
-    assert any("'b'" in m and "1 missing" in m for m in p)
-
-
 def test_duplicates_limited_to_ten_with_total():
     df = pd.DataFrame({"k": [i // 2 for i in range(30)]})  # 15 duplicated combinations
     p = _problems(df, ["k"], ["k"])
@@ -63,4 +54,4 @@ def test_duplicate_check_skipped_for_missing_key_column():
 def test_all_problems_in_one_error():
     df = pd.DataFrame({"k": [1, 1, None], "x": [1, 2, 3]})
     p = _problems(df, ["k", "v"], ["k"])
-    assert len(p) == 4  # extra, missing, missing key, duplicates
+    assert len(p) == 3  # extra, missing, duplicates (missing key values are valid, Req 6.5)

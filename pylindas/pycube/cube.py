@@ -48,7 +48,7 @@ def query_lindas(query: str, environment: str):
     from pylindas.lindas.query import query_lindas as _query_lindas
     return _query_lindas(query, environment=environment)
 
-from pylindas.pycube.validation import dimension_columns, validate_dataframe
+from pylindas.pycube.validation import dimension_columns, validate_dataframe, UNDEFINED_TOKEN
 from pylindas.pycube.hierarchy import check_hierarchy, edges_from_parent_column
 from pyshacl import validate
 
@@ -70,7 +70,7 @@ class Cube:
     _EXISTENCE_CHECK_MODES = ("public", "none")
 
     def __init__(self, dataframe: pd.DataFrame, cube_yaml: dict, environment: str, local=False,
-                 existence_check: str = "public", validate_description: bool = True):
+                 existence_check: str = "public", validate_description: Union[str, bool] = "warn"):
         """
         Initialize a Cube object.
 
@@ -81,21 +81,36 @@ class Cube:
             local (bool): A flag indicating whether the cube is local.
             existence_check (str): "public" (default) asks the public endpoint whether the cube
                 already exists and raises CubeAlreadyExistsError; "none" sends no request.
-            validate_description (bool): Whether the cube description is schema-validated.
-                If True (default), the description is checked against the packaged schema before any
-                triple is created; False skips the check.
+            validate_description ("warn", "strict", True or False): Schema validation of the cube
+                description, run against the packaged schema before any triple is created.
+                "warn" (default): all violations are reported in ONE ``logger.warning`` (the module
+                logger 'pycube', like all other problems reported by this class; ``warnings.warn``
+                is deliberately not used) as ``path: message`` entries, and the cube is built anyway.
+                "strict": a single ``DescriptionValidationError`` listing every violation is raised.
+                True is an alias for "strict". False skips validation and logs nothing.
 
         Returns:
             None
 
         Raises:
             ExistenceCheckError: if ``existence_check`` is not "public" or "none".
-            DescriptionValidationError: if ``validate_description`` is True and the description violates the schema.
+            ValueError: if ``validate_description`` is not "warn", "strict", True or False.
+            DescriptionValidationError: if ``validate_description`` is "strict" (or True) and the
+                description violates the schema.
         """
         if existence_check not in self._EXISTENCE_CHECK_MODES:
             raise ExistenceCheckError(
                 f"Invalid value {existence_check!r} for parameter 'existence_check'; "
                 f"accepted values are \"public\" and \"none\"."
+            )
+        # Identity checks on purpose: 1 == True and 0 == False must not be accepted as booleans.
+        if validate_description is True:
+            validate_description = "strict"
+        if not (validate_description is False or (
+                isinstance(validate_description, str) and validate_description in ("warn", "strict"))):
+            raise ValueError(
+                f"Invalid value {validate_description!r} for parameter 'validate_description'; "
+                f"accepted values are \"warn\", \"strict\", True (alias for \"strict\") and False."
             )
         # Deep copy first, so nothing below (success or error) can touch the caller's objects.
         cube_yaml = copy.deepcopy(cube_yaml)
@@ -104,8 +119,12 @@ class Cube:
         self._validate_description = validate_description
         if validate_description:
             violations = validate_description_schema(cube_yaml)
-            if violations:
+            if violations and validate_description == "strict":
                 raise DescriptionValidationError(violations)
+            if violations:
+                logger.warning(
+                    "Cube description violates the schema (%d violation(s)); building the cube anyway: %s",
+                    len(violations), "; ".join(f"{v.path}: {v.message}" for v in violations))
         # Computed once, before _setup_shape_dicts pops "dimensions" from the working dict.
         self._dimension_columns = dimension_columns(cube_yaml)
         # Independent copy: _cube_dict (below) is mutated during setup, _cube_yaml is not.
@@ -349,14 +368,32 @@ class Cube:
         self._dataframe = self._dataframe.set_index("obs-uri")
 
     @staticmethod
+    def _is_missing(value) -> bool:
+        """True for a scalar missing value (None, NaN, pd.NA, NaT)."""
+        try:
+            return bool(pd.isna(value))
+        except (TypeError, ValueError):
+            return False
+
+    @staticmethod
+    def _is_iri_dimension(dim_dict: dict) -> bool:
+        """True if the dimension's values are IRIs (datatype URI, or a mapping producing shared IRIs)."""
+        mapping = dim_dict.get("mapping")
+        if mapping:
+            return mapping.get("value-type", "Shared") == "Shared"
+        return dim_dict.get("datatype") == "URI"
+
+    @staticmethod
     def _make_obs_iri(cube_uri, key_values: list) -> URIRef:
         """Build an observation URI from a cube URI and ordered key values.
 
         Percent-encodes each key value (``safe=""`` encodes everything that is
         not unreserved), joins them with ``_`` in order, and wraps the result as
-        a ``URIRef``.
+        a ``URIRef``. A missing value (None / NaN / pd.NA) becomes the token
+        ``undefined``; ``validate_dataframe`` rejects a key column that also holds
+        the real value ``"undefined"``, so IRIs stay unique.
         """
-        parts = [quote(str(v), safe="") for v in key_values]
+        parts = [UNDEFINED_TOKEN if Cube._is_missing(v) else quote(str(v), safe="") for v in key_values]
         return URIRef(f"{cube_uri}/observation/{'_'.join(parts)}")
 
     # Function for dynamic replacement of column names, in between {} by effective column values in a row
@@ -368,6 +405,15 @@ class Cube:
             if placeholder in row:
                 result = result.replace(f'{{{placeholder}}}', str(row[placeholder]))
         return result
+
+    def _concept_iri(self, row, dim_name: str, template: str):
+        """Fill a concept IRI template; None if the dimension or any referenced column is missing."""
+        if self._is_missing(row[dim_name]):
+            return None
+        for placeholder in re.findall(r'\{(.*?)\}', template):
+            if placeholder in row and self._is_missing(row[placeholder]):
+                return None
+        return self._replace_placeholders(row, template)
 
     def _apply_mappings(self) -> None:
         """Apply mappings to the dataframe based on the specified mapping type.
@@ -387,13 +433,15 @@ class Cube:
                 match mapping.get("type"):
                     case "additive":
                         base = mapping.get("base") + "{}"
-                        self._dataframe[dim_name] = self._dataframe[dim_name].map(lambda x: base.format(quote(str(x))))
+                        self._dataframe[dim_name] = self._dataframe[dim_name].map(lambda x: x if Cube._is_missing(x) else base.format(quote(str(x))))
                     case "replace":
-                        self._dataframe[dim_name] = self._dataframe[dim_name].map(mapping.get("replacements"))
+                        # missing values stay missing (they become cube:Undefined)
+                        col = self._dataframe[dim_name]
+                        self._dataframe[dim_name] = col.map(mapping.get("replacements")).where(col.notna(), None)
                     case "regex":
                         pat = re.compile(mapping.get("pattern"))
                         repl = mapping.get("replacement")
-                        self._dataframe[dim_name] = self._dataframe[dim_name].map(lambda x: re.sub(pat, repl, x))
+                        self._dataframe[dim_name] = self._dataframe[dim_name].map(lambda x: x if Cube._is_missing(x) else re.sub(pat, repl, x))
                     case "concept":
                         # The replacement string is a URL with fields in-between {}, as for example:
                         #   /airport_type/{typeOfAirport}/{typeOfAirport2nd}
@@ -406,14 +454,16 @@ class Cube:
                             repl = str(self._cube_uri) + "/concept" + repl
 
                         # Perform the {} placeholder replacement with the column values, for each row
-                        self._dataframe[dim_name] = self._dataframe.apply(lambda row: self._replace_placeholders(row, repl), axis=1)
+                        self._dataframe[dim_name] = self._dataframe.apply(lambda row: self._concept_iri(row, dim_name, repl), axis=1)
                     case "function":
                         func = self._load_function_via_exec(mapping.get("filepath"), mapping.get("function-name"))
-                        self._dataframe[dim_name] = self._dataframe[dim_name].map(func)
+                        self._dataframe[dim_name] = self._dataframe[dim_name].map(
+                            lambda x: x if Cube._is_missing(x) else func(x))
                         
                 value_type = mapping.get("value-type", 'Shared')
                 assert value_type in ['Shared', 'Literal']
-                self._dataframe[dim_name] = self._dataframe[dim_name].map(lambda v: URIRef(v) if value_type == "Shared" else Literal(v))
+                self._dataframe[dim_name] = self._dataframe[dim_name].map(
+                    lambda v: v if Cube._is_missing(v) else (URIRef(v) if value_type == "Shared" else Literal(v)))
 
     @staticmethod
     def _load_function_via_exec(filepath: str, function_name: str) -> Callable:
@@ -553,7 +603,8 @@ class Cube:
         for column in obs.keys():
             shape_column = self._get_shape_column(column)
             path = URIRef(self._base_uri + "/" + shape_column.get("path"))
-            sanitized_value = self._sanitize_value(obs.get(column), shape_column.get("datatype"), shape_column.get("language"))
+            sanitized_value = self._sanitize_value(obs.get(column), shape_column.get("datatype"), shape_column.get("language"),
+                                                   iri=self._is_iri_dimension(shape_column))
             self._graph.add((obs.name, URIRef(path), sanitized_value))
 
     def _get_shape_column(self, column: str):
@@ -853,11 +904,24 @@ class Cube:
         
         self._graph.add((dim_node, SH.path, URIRef(self._base_uri + "/" + dim_dict.get("path"))))
 
+        has_missing = bool(values.isna().any())
+        # Node that carries the real-datatype constraints (min/max): the dimension node itself,
+        # or the first sh:or branch if the dimension contains a missing value (literal dimensions).
+        value_node = dim_node
         if dim_dict.get("datatype") == "URI":
             self._graph.add((dim_node, SH.nodeKind, SH.IRI))
         else:
             self._graph.add((dim_node, SH.nodeKind, SH.Literal))
-            self._graph.add((dim_node, SH.datatype, XSD[dim_dict.get("datatype")]))
+            if has_missing:
+                value_node = BNode()
+                undefined_node = BNode()
+                self._graph.add((value_node, SH.datatype, XSD[dim_dict.get("datatype")]))
+                self._graph.add((undefined_node, SH.datatype, CUBE.Undefined))
+                or_list = BNode()
+                Collection(self._graph, or_list, [value_node, undefined_node])
+                self._graph.add((dim_node, SH["or"], or_list))
+            else:
+                self._graph.add((dim_node, SH.datatype, XSD[dim_dict.get("datatype")]))
 
         match dim_dict.get("dimension-type"):
             case "Key Dimension":
@@ -910,10 +974,10 @@ class Cube:
                     self._add_sh_list(dim_dict, dim_node, values)
             case "interval":
                 self._graph.add((dim_node, QUDT.scaleType, QUDT.IntervalScale))
-                self._add_min_max(dim_dict, dim_node, values)
+                self._add_min_max(dim_dict, value_node, values)
             case "ratio":
                 self._graph.add((dim_node, QUDT.scaleType, QUDT.RatioScale))
-                self._add_min_max(dim_dict, dim_node, values)
+                self._add_min_max(dim_dict, value_node, values)
             case _ as unrecognized:
                 logger.error(f"Scale Type '{unrecognized}' is not recognized")
         
@@ -1135,11 +1199,17 @@ class Cube:
                 None
         """
         list_node = BNode()
-        unique_values = values.unique()
+        has_missing = bool(values.isna().any())
+        unique_values = values.dropna().unique()
         if dimension_dict.get("datatype") == "URI":
-            Collection(self._graph, list_node, [URIRef(vl) for vl in unique_values])
+            items = [URIRef(vl) for vl in unique_values]
+            if has_missing:
+                items.insert(0, URIRef(CUBE.Undefined))
         else:
-            Collection(self._graph, list_node, [Literal(vl, datatype=XSD[dimension_dict.get("datatype")]) for vl in unique_values])
+            items = [Literal(vl, datatype=XSD[dimension_dict.get("datatype")]) for vl in unique_values]
+            if has_missing:
+                items.insert(0, Literal("", datatype=CUBE.Undefined))
+        Collection(self._graph, list_node, items)
         self._graph.add((dim_node, URIRef(SH + "in"), list_node))
 
     def _add_min_max(self, dim_dict: dict, dim_node: BNode, values: pd.Series):
@@ -1149,10 +1219,11 @@ class Cube:
                 dim_node (BNode): The dimension node to which the values will be added.
                 values (pd.Series): The series of values from which minimum and maximum will be calculated.
         
-            Todo:
-                Case of cube.Undefined should be covered.
+            Missing values (written as cube:Undefined) are ignored; with no real value no bound is written.
         """
-        # todo: case of cube.Undefined should be covered
+        values = values.dropna()
+        if values.empty:
+            return
         _min = values.min()
         _max = values.max()
 
@@ -1161,19 +1232,23 @@ class Cube:
         self._graph.add((dim_node, SH.maxInclusive, Literal(_max, datatype=XSD[_datatype])))
 
     @staticmethod
-    def _sanitize_value(value, datatype, lang=None) -> Literal|URIRef:
+    def _sanitize_value(value, datatype, lang=None, iri: bool | None = None) -> Literal|URIRef:
         """Sanitize the input value to ensure it is in a valid format.
         
             Args:
                 value: The value to be sanitized.
                 datatype: The datatype of the value, given as string from XSD namespace (e.g. "integer", "string", "gYear", ...).
                 lang: The language of the value if it is a string (e.g. "de", "fr", ...).
+                iri: Whether the dimension holds IRIs; decides the form of a missing value
+                    (``cube:Undefined`` IRI vs ``""^^cube:Undefined``). Defaults to ``datatype == "URI"``.
         
             Returns:
                 Literal or URIRef: The sanitized value in the form of a typed or language tagged Literal or URIRef.
         """
+        if iri is None:
+            iri = datatype == "URI"
         if pd.isna(value):
-            return Literal("", datatype=CUBE.Undefined)
+            return URIRef(CUBE.Undefined) if iri else Literal("", datatype=CUBE.Undefined)
         elif datatype == "URI":
             return URIRef(value)
         elif lang!=None:

@@ -53,12 +53,12 @@ def _dataframes(draw):
     )
 
 
-def _construct(df, cube_yaml):
-    return Cube(dataframe=df, cube_yaml=cube_yaml, environment="TEST", local=True)
+def _construct(df, cube_yaml, **kwargs):
+    return Cube(dataframe=df, cube_yaml=cube_yaml, environment="TEST", local=True, **kwargs)
 
 
-def _full_build(df, cube_yaml):
-    return _construct(df, cube_yaml).prepare_data().write_cube().write_observations().write_shape()
+def _full_build(df, cube_yaml, **kwargs):
+    return _construct(df, cube_yaml, **kwargs).prepare_data().write_cube().write_observations().write_shape()
 
 
 # Known, accepted non-determinism: write_cube stamps schema:datePublished (http://schema.org/, the namespace pylindas uses) (today) and
@@ -128,7 +128,7 @@ def test_failing_construction_does_not_mutate_inputs(df, broken):
     df_snapshot = df.copy(deep=True)
 
     with pytest.raises(Exception):
-        _full_build(df, yaml_in)
+        _full_build(df, yaml_in, validate_description="strict")
 
     assert yaml_in == yaml_snapshot
     pd.testing.assert_frame_equal(df, df_snapshot)

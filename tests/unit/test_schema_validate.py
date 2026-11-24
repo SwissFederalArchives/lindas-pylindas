@@ -140,7 +140,7 @@ def test_constructor_raises_single_error_with_all_violations_and_leaves_yaml_unc
     del d["Name"]
     before = copy.deepcopy(d)
     with pytest.raises(DescriptionValidationError) as e:
-        Cube(_frame(d), d, "TEST", local=True)
+        Cube(_frame(d), d, "TEST", local=True, validate_description="strict")
     assert {v.path for v in e.value.violations} == {"A", "Name"}
     assert d == before
 
@@ -151,16 +151,93 @@ def test_constructor_skips_validation_when_false():
     Cube(pd.DataFrame({c: ["x"] for c in d["dimensions"]}), d, "TEST", local=True, validate_description=False)
 
 
-def test_validation_default_is_true():
+def test_validation_default_is_warn():
     # Requirement 7.4
     import inspect
 
     default = inspect.signature(Cube.__init__).parameters["validate_description"].default
-    assert default is True
+    assert default == "warn"
+
+
+def _violating():
     d = _mock()
     d["A"] = 1
-    with pytest.raises(DescriptionValidationError):
-        Cube(_frame(d), d, "TEST", local=True)  # no validate_description argument
+    del d["Name"]
+    return d
+
+
+def _pycube_warnings(caplog):
+    return [r for r in caplog.records if r.name == "pycube" and r.levelname == "WARNING"]
+
+
+def test_warn_logs_exactly_one_warning_with_all_violations_and_builds(caplog):
+    # Requirements 7.3, 7.5, 7.6
+    d = _violating()
+    before = copy.deepcopy(d)
+    expected = validate_description(d)
+    assert {v.path for v in expected} == {"A", "Name"}
+    with caplog.at_level("WARNING", logger="pycube"):
+        cube = Cube(_frame(d), d, "TEST", local=True)  # default mode
+    records = _pycube_warnings(caplog)
+    assert len(records) == 1
+    msg = records[0].getMessage()
+    for v in expected:
+        assert f"{v.path}: {v.message}" in msg
+    assert cube._graph is not None
+    assert d == before
+
+
+def test_explicit_warn_behaves_like_default(caplog):
+    d = _violating()
+    with caplog.at_level("WARNING", logger="pycube"):
+        Cube(_frame(d), d, "TEST", local=True, validate_description="warn")
+    assert len(_pycube_warnings(caplog)) == 1
+
+
+def test_warn_valid_description_logs_nothing(caplog):
+    d = _mock()
+    with caplog.at_level("WARNING", logger="pycube"):
+        Cube(_frame(d), d, "TEST", local=True)
+    assert _pycube_warnings(caplog) == []
+
+
+def test_strict_raises_and_logs_no_warning(caplog):
+    d = _violating()
+    with caplog.at_level("WARNING", logger="pycube"):
+        with pytest.raises(DescriptionValidationError) as e:
+            Cube(_frame(d), d, "TEST", local=True, validate_description="strict")
+    assert {v.path for v in e.value.violations} == {"A", "Name"}
+    assert _pycube_warnings(caplog) == []
+
+
+def test_true_is_alias_for_strict():
+    d = _violating()
+    with pytest.raises(DescriptionValidationError) as e_true:
+        Cube(_frame(d), d, "TEST", local=True, validate_description=True)
+    with pytest.raises(DescriptionValidationError) as e_strict:
+        Cube(_frame(d), d, "TEST", local=True, validate_description="strict")
+    assert e_true.value.violations == e_strict.value.violations
+
+
+def test_false_skips_validation_and_logs_nothing(caplog):
+    d = _violating()
+    with caplog.at_level("WARNING", logger="pycube"):
+        Cube(_frame(d), d, "TEST", local=True, validate_description=False)
+    assert _pycube_warnings(caplog) == []
+
+
+@pytest.mark.parametrize("bad", ["loose", "", "STRICT", 1, 0, None, 1.0])
+def test_invalid_mode_rejected_before_any_request(bad):
+    from unittest import mock
+
+    d = _mock()
+    with mock.patch.object(Cube, "_setup_cube_uri") as setup_uri:
+        with pytest.raises(ValueError) as e:
+            Cube(_frame(d), d, "TEST", local=False, validate_description=bad)
+    assert "validate_description" in str(e.value)
+    for accepted in ('"warn"', '"strict"', "False"):
+        assert accepted in str(e.value)
+    setup_uri.assert_not_called()
 
 
 def test_validation_runs_before_any_triple_is_created():
@@ -173,6 +250,6 @@ def test_validation_runs_before_any_triple_is_created():
         Cube, "_setup_cube_uri"
     ) as setup_uri:
         with pytest.raises(DescriptionValidationError):
-            Cube(_frame(d), d, "TEST", local=True, validate_description=True)
+            Cube(_frame(d), d, "TEST", local=True, validate_description="strict")
     setup_graph.assert_not_called()
     setup_uri.assert_not_called()
