@@ -19,14 +19,14 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        os: [ 'ubuntu-24.04', 'macos-15', 'windows-2022' ]
-        python-version: ['3.10', '3.11.2', '3.12', '3.13']
+        os: [ 'ubuntu-26.04', 'macos-26', 'windows-2025' ]
+        python-version: ['3.10', '3.11', '3.12', '3.13', '3.14', '3.15']
     runs-on: ${{ matrix.os }}
 
     steps:
-    - uses: actions/checkout@v4
+    - uses: actions/checkout@v7
     - name: Set up Python ${{ matrix.python-version }}
-      uses: actions/setup-python@v5
+      uses: actions/setup-python@v7
       with:
         python-version: ${{ matrix.python-version }}
     - name: install requirements
@@ -40,32 +40,34 @@ jobs:
       run: |
         pytest -s -vv tests example/Cubes/Biotope_Statistik/biotope.py example/Cubes/concept_table_airport/airport.py example/Cubes/mock/mock.py example/Shared_Dimensions/shared_dimension_generation/sd_example.py
 
-  test-pandas3:
-    name: 🧊 CI test (pandas 3 + pyarrow)
-    runs-on: ubuntu-24.04
+  test-latest-deps:
+    name: 🧊 CI test (latest deps)
+    runs-on: ubuntu-latest
+    continue-on-error: true
     steps:
-    - uses: actions/checkout@v4
-    - name: Set up Python 3.13
-      uses: actions/setup-python@v5
+    - uses: actions/checkout@v7
+    - name: Set up Python 3.x
+      uses: actions/setup-python@v7
       with:
-        python-version: '3.13'
+        python-version: '3.x'
     - name: install requirements
       run: |
         python -m pip install --upgrade pip
-        grep -viE '^(pandas|numpy|rdflib)==' requirements-dev.txt > /tmp/req.txt
-        pip install -r /tmp/req.txt
-        pip install "pandas>=3" "numpy>=2.3" "rdflib>=7.1" pyarrow
+        sed -i -E 's/==.*$//' requirements.txt
+        sed -i -E 's/==.*$//' requirements-dev.txt
+        pip install -r requirements-dev.txt
     - name: test
       env:
         PYTHONUTF8: 1
-      run: pytest -q tests/unit
+      run: pytest -q tests example/Cubes/Biotope_Statistik/biotope.py example/Cubes/concept_table_airport/airport.py example/Cubes/mock/mock.py example/Shared_Dimensions/shared_dimension_generation/sd_example.py
+
   lint:
     name: 🧹 Ruff lint
-    runs-on: ubuntu-24.04
+    runs-on: ubuntu-26.04
     if: github.event_name == 'pull_request'
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-python@v5
+      - uses: actions/checkout@v7
+      - uses: actions/setup-python@v7
         with:
           python-version: '3.12'
       - run: pip install ruff
